@@ -453,7 +453,7 @@ SET( OPENGL_LIBRARIES "GLU_static" ${OPENGL_LIBRARIES})
 IF(NOT QT_ANDROID)
 # Find wxWidgets here, and the setting get inherited by all plugins.
 # These options can be used to set the linux widgets build type
-SET( wxWidgets_USE_DEBUG OFF)
+SET( wxWidgets_USE_DEBUG ON)
 SET( wxWidgets_USE_UNICODE ON)
 SET( wxWidgets_USE_UNIVERSAL OFF)
 SET( wxWidgets_USE_STATIC OFF)

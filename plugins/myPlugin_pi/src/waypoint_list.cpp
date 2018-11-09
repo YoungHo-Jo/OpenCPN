@@ -11,7 +11,6 @@
 BEGIN_EVENT_TABLE(myFrame, wxFrame)
 	EVT_PAINT(myFrame::OnPaint)
 	EVT_SIZE(myFrame::OnSize)
-
 END_EVENT_TABLE()
 
 myFrame::myFrame(const wxString& title, Plugin_WaypointList wp, vector<time_t> t)

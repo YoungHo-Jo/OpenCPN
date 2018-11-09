@@ -18,12 +18,28 @@
 #include <wx/sckipc.h>
 #include <wx/sstream.h>
 #include <wx/protocol/http.h>
-#include <thread>
+#include "SettingFrame.h"
 
 
 #define TAG "[myPlugin_window] "
 #define CLI_DEBUG 0
 #define WX_DEBUG 1
+
+#if WX_DEBUG == 1
+#define D(s) s
+#else
+#define D(s)
+#endif
+
+const unsigned int TAG_INFO_REQUEST_INTERVAL = 10000;
+const unsigned int MAP_UPDATE_INTERVAL = 1000;
+
+
+//--------------------------------------------------------------
+//
+//              Dummy data
+//
+//--------------------------------------------------------------
 
 wxString json(_T("{\n"
                  "\t\"items\": [{\n"
@@ -54,23 +70,30 @@ wxString json(_T("{\n"
                  "\t}]\n"
                  "}"));
 
+
+
 //----------------------------------------------------------------
 //
 //    demo Window Implementation
 //
 //----------------------------------------------------------------
 
+wxDECLARE_EVENT(wxEVT_COMMAND_WOKRERTHREAD_COMPLETED, wxCommandEvent);
+wxDECLARE_EVENT(wxEVT_COMMAND_WOKRERTHREAD_UPDATE, wxCommandEvent);
+
 BEGIN_EVENT_TABLE(myPlugin_window, wxWindow)
                 EVT_PAINT(myPlugin_window::OnPaint)
                 EVT_SIZE(myPlugin_window::OnSize)
-                EVT_BUTTON(myPlugin_window::ADD_BUTTON, myPlugin_window::OnAddButtonClick)
-                EVT_BUTTON(myPlugin_window::REMOVE_BUTTON, myPlugin_window::OnRemoveButtonClick)
-                EVT_BUTTON(myPlugin_window::CONNECT_BUTTON, myPlugin_window::OnConnectButtonClick)
-                EVT_SOCKET(myPlugin_window::wxID_CLIENT_SOCKET, myPlugin_window::OnClientSocketEvent)
                 EVT_TIMER(myPlugin_window::wxID_TIMER, myPlugin_window::OnTimer)
                 EVT_TIMER(myPlugin_window::wxID_REFRESH, myPlugin_window::OnRefresh)
                 EVT_LIST_ITEM_ACTIVATED(myPlugin_window::TAG_LIST, myPlugin_window::OnListDoubleClick)
+                EVT_COMMAND(wxID_ANY, wxEVT_COMMAND_WOKRERTHREAD_COMPLETED, myPlugin_window::OnThreadCompletion)
+                EVT_COMMAND(wxID_ANY, wxEVT_COMMAND_WOKRERTHREAD_UPDATE, myPlugin_window::OnThreadUpdate)
+                EVT_BUTTON(myPlugin_window::wxID_SETTING_BUTTON, myPlugin_window::OnSettingBtnClick)
 END_EVENT_TABLE()
+
+wxDEFINE_EVENT(wxEVT_COMMAND_WOKRERTHREAD_COMPLETED, wxCommandEvent);
+wxDEFINE_EVENT(wxEVT_COMMAND_WOKRERTHREAD_UPDATE, wxCommandEvent);
 
 
 
@@ -79,8 +102,10 @@ myPlugin_window::myPlugin_window(wxWindow *pparent, wxWindowID id)
         : wxWindow(pparent, id, wxPoint(-1, -1), wxSize(500, 600),
                    wxSIMPLE_BORDER, _T("OpenCPN PlugIn")) {
 
-    auto logWindow = new if\(WX_DEBUG\)\twxLogWindow(NULL, _T("log window"));
-    logWindow->Show(true);
+    D(
+        auto logWindow = new wxLogWindow(NULL, _T("log window"));
+        logWindow->Show(true);
+    )
 
     for(int i = 0; i < route.size(); i++){
         route[i] = nullptr;
@@ -90,66 +115,40 @@ myPlugin_window::myPlugin_window(wxWindow *pparent, wxWindowID id)
     CreateListView();
     UpdateListView();
     SetTimer();
-
+    CreateSettingButton();
 }
 
 myPlugin_window::~myPlugin_window() {
 }
 
+// When the window size has changed
 void myPlugin_window::OnSize(wxSizeEvent &event) {
-//    if\(WX_DEBUG\)\twxLogMessage(_T(TAG"onSize"));
 }
-
-void myPlugin_window::OnAddButtonClick(wxCommandEvent &event) {
-    if(WX_DEBUG)	wxLogMessage(_T(TAG"AddButtonClick"));
-
-    AddWayPoints();
-}
-
-
-void myPlugin_window::OnRemoveButtonClick(wxCommandEvent &event) {
-    if(WX_DEBUG)	wxLogMessage(_T(TAG"RemoveButtonClick"));
-
-    RemoveWayPoints();
-}
-
-void myPlugin_window::OnConnectButtonClick(wxCommandEvent &event) {
-    if(WX_DEBUG)	wxLogMessage(_T(TAG"OnConnectButtonClick"));
-
-    if(isConnected) {
-//        client->Destroy();
-        connectButton->SetLabel(_T("Connect"));
-    } else {
-//        GetWayPointsFromSocket();
-        GetWayPointsFromHTTP();
-    }
-}
-
 
 void myPlugin_window::SetSentence(wxString &sentence) {
 }
 
+// When the window has getting updated
 void myPlugin_window::OnPaint(wxPaintEvent &event) {
-    if(WX_DEBUG)	wxLogMessage(_T(TAG "onPaint"));
+    D(wxLogMessage(_T(TAG "onPaint"));)
 
     wxPaintDC dc(this);
 
 }
-void myPlugin_window::GetWayPointsFromJSON(wxString json) {
-    if(WX_DEBUG)	wxLogMessage(_T(TAG"GetWayPointsFromJSON"));
-    if(WX_DEBUG)	wxLogMessage(json);
-    cout << json << endl;
+void myPlugin_window::GetWayPointsFromJSON(wxString& json) {
+    D(wxLogMessage(_T(TAG"GetWayPointsFromJSON"));)
+    D(wxLogMessage(json);)
 
     wxJSONValue root;
     wxJSONReader reader;
 
     int numErrors = reader.Parse(json, &root);
-    if(numErrors > 0) {
-        if(WX_DEBUG)	wxLogMessage(_T(TAG"ERROR: the json document is not well-formed"));
+    if(numErrors > 0) { // Error occured
+        D(wxLogMessage(_T(TAG"ERROR: the json document is not well-formed"));)
         const wxArrayString errors = reader.GetErrors();
 
         for(auto error: errors) {
-            if(WX_DEBUG)	wxLogMessage(error);
+            D(wxLogMessage(error);)
         }
         return;
     }
@@ -157,11 +156,10 @@ void myPlugin_window::GetWayPointsFromJSON(wxString json) {
     wxJSONValue items = root["items"];
     map<wxString, vector<double> > values;
     map<wxString, time_t> timeValues;
-    map<wxString, vector<double> >::iterator it;
 
     for(int i = 0; i < items.Size(); i++) {
         if(items[i]["tag_id"].AsString().Len() < 1){
-            if(WX_DEBUG)	wxLogMessage("Name string < 1");
+            D(wxLogMessage("Name string < 1");)
             continue;
         }
 
@@ -177,13 +175,13 @@ void myPlugin_window::GetWayPointsFromJSON(wxString json) {
         tmpLatStr.ToDouble(&lat);
         tmpLonStr.ToDouble(&lon);
 
-        // Save coordinate that most recently
-        if(timeValues.find(tmpName) == timeValues.end()){
+        // Save the coordinate that is most recently
+        if(timeValues.find(tmpName) == timeValues.end()){ // Newest
             values[tmpName] = {lat, lon};
             timeValues[tmpName] = tmpTime;
         }
-        else{
-            if(timeValues[tmpName] < tmpTime){
+        else {
+            if(timeValues[tmpName] < tmpTime){ // The stored one is later than this
                 timeValues[tmpName] = tmpTime;
                 values[tmpName] = {lat, lon};
             }
@@ -195,18 +193,12 @@ void myPlugin_window::GetWayPointsFromJSON(wxString json) {
         }
     }
 
-// Print saved value
-    for(it = values.begin(); it != values.end(); it++){
-        if(WX_DEBUG)	wxLogMessage("name: %s, lat:%f, lon:%f", it->first, it->second[0], it->second[1]);
-        cout << "name: " << it->first << ", lat: " << it->second[0] << ", lon: " << it->second[1] << ", time: " << timeValues[it->first] << endl;
-    }
-
 // Create waypoint & Append to waypoint list
-    for(it = values.begin(); it != values.end(); it++){
+    for(auto it = values.begin(); it != values.end(); it++){
         PlugIn_Waypoint *waypoint = new PlugIn_Waypoint(
                 it->second[0],
                 it->second[1],
-                _T("Red X"),
+                _T("Red X"), // Set the icon
                 it->first,
                 GetNewGUID()); //// Causing duplicated waypoints
 
@@ -214,11 +206,11 @@ void myPlugin_window::GetWayPointsFromJSON(wxString json) {
         wayPointList[it->first].t.push_back(timeValues[it->first]);
     }
 
-    if(WX_DEBUG)	wxLogMessage(wxT(TAG"Done with extracting way points from json"));
+    D(wxLogMessage(wxT(TAG"Done: Extracting way points from the json"));)
 }
 
 void myPlugin_window::CreateListView() {
-    if(WX_DEBUG)	wxLogMessage(_T(TAG "Create list view"));
+    D(wxLogMessage(_T(TAG "Create list view"));)
 
     if(listView == nullptr) {
         listView = new wxListView(this, TAG_LIST,
@@ -226,7 +218,6 @@ void myPlugin_window::CreateListView() {
                                   wxLC_REPORT, wxDefaultValidator, wxT("myListView"));
     }
 
-// listView->InsertColumn(Column::NO, wxT("No"), wxLIST_FORMAT_LEFT);
     listView->InsertColumn(Column::NAME, wxT("TAG"), wxLIST_FORMAT_LEFT);
     listView->InsertColumn(Column::LAT, wxT("Lat"), wxLIST_FORMAT_LEFT);
     listView->InsertColumn(Column::LON, wxT("Lon"), wxLIST_FORMAT_LEFT);
@@ -234,23 +225,25 @@ void myPlugin_window::CreateListView() {
 }
 
 void myPlugin_window::AddWayPoints() {
-    if(WX_DEBUG)	wxLogMessage(_T(TAG"Add Way Points"));
+    D(wxLogMessage(_T(TAG"Add Way Points"));)
     for(int i = 0; i < name.size(); i++){
         for(auto wayPoint: wayPointList[name[i]].wp) {
             AddSingleWaypoint(wayPoint, false);
         }
     }
-    if(WX_DEBUG)	wxLogMessage(_T(TAG"Done with adding way points on the map"));
+    D(wxLogMessage(_T(TAG"Done: Adding way points on the map"));)
 }
 
 void myPlugin_window::AddRoutes(){
 // Delete all route
     for(int i = 0; i < route.size(); i++){
+        delete route[i]->pWaypointList;
         DeletePlugInRoute(route[i]->m_GUID);
     }
     route.clear();
 
 // Create route with name(A1, A2, ...) using iterator
+    const unsigned int MAX_ROUTE_LENGTH = 10;
     map<wxString, Waypoint_st>::iterator it;
     for(it = wayPointList.begin(); it != wayPointList.end(); it++){
         PlugIn_Route *newRoute = nullptr;
@@ -259,17 +252,24 @@ void myPlugin_window::AddRoutes(){
         newRoute->m_StartString = wxString(wxT("Start"));
         newRoute->m_EndString = wxString(wxT("End"));
         newRoute->m_GUID = GetNewGUID();
-        newRoute->pWaypointList = &(it->second.wp);
+        Plugin_WaypointList *newList = new Plugin_WaypointList;
+        newList->assign(it->second.wp.begin(), it->second.wp.end());
+
+        //// TODO: NOT GOOD
+//        while(newList->size() <= MAX_ROUTE_LENGTH) {
+//           newList->pop_front();
+//        }
+//        newRoute->pWaypointList = &(it->second.wp);
+        newRoute->pWaypointList = newList;
 
         AddPlugInRoute(newRoute, false);
         route.push_back(newRoute);
     }
-    cout << "route: " << route.size() << endl;
     parent->Refresh();
 }
 
 void myPlugin_window::RemoveWayPoints() {
-    if(WX_DEBUG)	wxLogMessage(_T(TAG"Remove Way Points"));
+    D(wxLogMessage(_T(TAG"Remove Way Points"));)
     for(int i = 0; i < name.size(); i++){
         for(auto wayPoint: wayPointList[name[i]].wp) {
             DeleteSingleWaypoint(wayPoint->m_GUID);
@@ -278,57 +278,17 @@ void myPlugin_window::RemoveWayPoints() {
 // wayPointList.clear();
 }
 
-void myPlugin_window::UpdateWayPointsAll(wxString json) {
-    if(WX_DEBUG)	wxLogMessage(_T(TAG"Update all way points"));
+void myPlugin_window::UpdateWayPointsAll(wxString& json) {
+    D(wxLogMessage(_T(TAG"Update all way points"));)
 
-// RemoveWayPoints();
     GetWayPointsFromJSON(json);
-// AddWayPoints();
     AddRoutes();
 }
 
-void myPlugin_window::CreateWayPointAddButton() {
-    if(wayPointAddButton == nullptr) {
-        wayPointAddButton = new wxButton(this, ADD_BUTTON, _T("Add"), wxPoint(5, 505), wxSize(50, 50));
-    }
-}
-
-void myPlugin_window::CreateWayPointRemoveButton() {
-    if(wayPointRemoveButton == nullptr) {
-        wayPointRemoveButton = new wxButton(this, REMOVE_BUTTON, _T("Remove"), wxPoint(60, 505), wxSize(100, 50));
-    }
-}
-
-void myPlugin_window::CreateConnectButton() {
-    if(connectButton == nullptr) {
-        connectButton = new wxButton(this, CONNECT_BUTTON, _T("Connect"),
-                                     wxPoint(100, 505), wxSize(100, 50));
-    }
-}
-
-// void myPlugin_window::UpdateListView() {
-// 	if\(WX_DEBUG\)\twxLogMessage(_T(TAG"Update list view"));
-// 	if(listView == nullptr) {
-// 		if\(WX_DEBUG\)\twxLogMessage(_T(TAG"No list view"));
-// 		return;
-// 	}
-
-// 	long index = 0;
-// 	if\(WX_DEBUG\)\twxLogMessage(_T(TAG"IN UpdateListView: wayPointList items: "), wayPointList.size());
-// 	for (auto wayPoint: wayPointList) {
-// 		listView->InsertItem(index, wxString::Format(wxT("%d"), index + 1));
-// 		listView->SetItem(index, Column::LAT, wxString::Format(wxT("%f"), wayPoint->m_lat));
-// 		listView->SetItem(index, Column::LON, wxString::Format(wxT("%f"), wayPoint->m_lon));
-// 		listView->SetItem(index, Column::NAME, wxString::Format(wxT("%s"), wayPoint->m_MarkName));
-// 		index++;
-// 	}
-// 	if\(WX_DEBUG\)\twxLogMessage(wxString::Format(wxT(TAG"The number of list view items: %d"), listView->GetItemCount()));
-// }
-
 void myPlugin_window::UpdateListView() {
-    if(WX_DEBUG)	wxLogMessage(_T(TAG"Update list view"));
+    D(wxLogMessage(_T(TAG"Update list view"));)
     if(listView == nullptr) {
-        if(WX_DEBUG)	wxLogMessage(_T(TAG"No list view"));
+        D(wxLogMessage(_T(TAG"No list view"));)
         return;
     }
 
@@ -342,139 +302,21 @@ void myPlugin_window::UpdateListView() {
         listView->SetItem(index, Column::TIME, wxDateTime(wayPointList[name[i]].t.back()).Format());
         index++;
     }
-    if(WX_DEBUG)	wxLogMessage(wxString::Format(wxT(TAG"The number of list view items: %d"), listView->GetItemCount()));
+    D(wxLogMessage(wxString::Format(wxT(TAG"The number of list view items: %d"), listView->GetItemCount()));)
 }
 
 void myPlugin_window::RemoveListViewItems() {
-    if(WX_DEBUG)	wxLogMessage(_T(TAG"Remove List View Items"));
+    D(wxLogMessage(_T(TAG"Remove List View Items"));)
 
     if(listView != nullptr) {
         listView->DeleteAllItems();
     }
-
 }
 
-
-void myPlugin_window::OnClientSocketEvent(wxSocketEvent &event) {
-    wxSocketBase *Sock = event.GetSocket();
-    if(WX_DEBUG)	wxLogMessage(wxT(TAG"[CLIENT] OnClientSocketEvent"));
-
-    char buffer[10000];
-
-    switch(event.GetSocketEvent()) {
-        case wxSOCKET_CONNECTION: {
-            if(WX_DEBUG)	wxLogMessage(wxT(TAG"[CLIENT] wxSOCKET_CONNECTION"));
-//            char mychar = '0';
-//
-//            for(int i=0; i<10; ++i) {
-//                buffer[i] = mychar++;
-//            }
-//
-//            Sock->Write(buffer, sizeof(buffer));
-            break;
-        }
-
-        case wxSOCKET_INPUT: {
-            if(WX_DEBUG)	wxLogMessage(wxT(TAG"[CLIENT] wxSOCKET_INPUT"));
-            Sock->Read(buffer, sizeof(buffer));
-
-            GetWayPointsFromJSON(wxString(buffer));
-//            try {
-//                GetWayPointsFromJSON(wxString(buffer));
-//            } catch (int e) {
-//                if\(WX_DEBUG\)\twxLogMessage(wxT(TAG"[EXCEPTION]"));
-//            }
-            UpdateListView();
-            AddWayPoints();
-            break;
-        }
-
-        case wxSOCKET_LOST: {
-            if(WX_DEBUG)	wxLogMessage(wxT(TAG"[CLIENT] wxSOCKET_LOST"));
-            Sock->Destroy();
-            break;
-        }
-    }
-}
-
-
-void myPlugin_window::GetWayPointsFromSocket() {
-    auto socketConn = new wxSocketClient();
-    wxIPV4address addr;
-    addr.Hostname(wxT("172.30.1.17"));
-    addr.Service(5555);
-
-    socketConn->SetEventHandler(*this, wxID_CLIENT_SOCKET);
-    socketConn->SetNotify(wxSOCKET_CONNECTION_FLAG | wxSOCKET_INPUT_FLAG | wxSOCKET_LOST_FLAG);
-    socketConn->Notify(true);
-
-    if(!socketConn->Connect(addr, true)) {
-        if(WX_DEBUG)	wxLogMessage(_T(TAG"ERROR: Socket Connection Failed"));
-        connectButton->SetLabel(_T("Disconnect"));
-        isConnected = true;
-        return;
-    }
-    if(WX_DEBUG)	wxLogMessage(_T(TAG"Socket Connection Success"));
-
-
-//    socketConn->SetNotify(wxSOCKET_CONNECTION);
-//    socketConn->Notify(true);
-//
-
-}
-
-
-wxString myPlugin_window::GetWayPointsFromHTTP() {
-    if(WX_DEBUG)	wxLogMessage(_T(TAG"Get Request"));
-    wxHTTP get;
-    get.SetHeader(_T("Content-type"), _T("text/html; charset=utf-8"));
-    get.SetTimeout(5);
-
-    if(!get.Connect(_T("192.168.88.1"), 8008)) return wxString(_T(""));
-
-
-//wxApp::IsMainLoopRunning();
-
-    wxInputStream *httpStream = get.GetInputStream(_T("/"));
-
-    wxString res;
-    if(get.GetError() == wxPROTO_NOERR) {
-        wxStringOutputStream outStream(&res);
-        httpStream->Read(outStream);
-    } else {
-        if(WX_DEBUG)	wxLogMessage(_T("Unable to connect"));
-    }
-
-    wxDELETE(httpStream);
-    get.Close();
-    return res;
-
-}
 
 void myPlugin_window::OnTimer(wxTimerEvent &event) {
-    if\(WX_DEBUG\)\twxLogMessage(_T(TAG"Timer: tick!"));
-// UpdateWayPointsAll(GetWayPointsFromHTTP());
-    UpdateWayPointsAll(json);
-    RemoveListViewItems();
-    UpdateListView();
-
-// for(int i = 0; i < tagFrame.size();){
-// 	if(tagFrame[i]->alive == false){
-// 		cout << "erase frame" << endl;
-// 		tagFrame.erase(tagFrame.begin() + i);
-// 	}
-// 	else{
-// 		i++;
-// 	}
-// }
-
-// cout << "frame size: " << tagFrame.size() << endl;
-// for(int i = 0; i < tagFrame.size();){
-// 	if(tagFrame[i]->alive){
-// 		tagFrame[i]->Set(wayPointList[tagFrame[i]->title].wp, wayPointList[tagFrame[i]->title].t);
-// 		i++;
-// 	}
-// }
+    D(wxLogMessage(_T(TAG"Timer: tick!"));)
+    DoStartThread();
 }
 
 void myPlugin_window::OnRefresh(wxTimerEvent &event){
@@ -483,21 +325,147 @@ void myPlugin_window::OnRefresh(wxTimerEvent &event){
 
 void myPlugin_window::SetTimer() {
     if(timer == nullptr){
-        if(WX_DEBUG)	wxLogMessage(_T(TAG"Timer: start"));
+        D(wxLogMessage(_T(TAG"Timer: start"));)
         timer = new wxTimer(this, wxID_TIMER);
-        timer->Start(10000);
+        timer->Start(requestInterval*1000);
     }
     if(refresh == nullptr){
         refresh = new wxTimer(this, wxID_REFRESH);
-        refresh->Start(1000);
+        refresh->Start(MAP_UPDATE_INTERVAL);
     }
 }
 
 void myPlugin_window::OnListDoubleClick(wxListEvent &event){
-    long index = event.GetIndex();
     wxString selected = event.GetItem().GetText();
 
     myFrame *newFrame = new myFrame(selected, wayPointList[selected].wp, wayPointList[selected].t);
     newFrame->Show(true);
 // tagFrame.push_back(newFrame);
 }
+
+void myPlugin_window::DoStartThread() {
+    D(wxLogMessage(TAG"Start Thread");)
+    if (msgQueue == nullptr) {
+        msgQueue = new wxMessageQueue<wxString>;
+        while(msgQueue->IsOk() == false) {
+            delete msgQueue;
+            msgQueue = new wxMessageQueue<wxString>;
+        }
+    }
+
+    // This is required to open sockets in a thread
+    wxSocketBase::Initialize();
+    auto workerThread = new WorkerThread(this, msgQueue, host, hostPort, requestTimeout);
+    if(workerThread->Run() != wxTHREAD_NO_ERROR) {
+        D(wxLogMessage(TAG"Can't create the thread!");)
+        delete msgQueue;
+        delete workerThread;
+        msgQueue = nullptr;
+    }
+}
+
+
+void myPlugin_window::OnThreadCompletion(wxCommandEvent &event) {
+    D(wxLogMessage(TAG"Thread exited!");)
+}
+
+void myPlugin_window::OnThreadUpdate(wxCommandEvent &event) {
+    D(wxLogMessage(TAG"Thread update...");)
+    wxString res;
+    try {
+        msgQueue->ReceiveTimeout(500, res);
+        UpdateWayPointsAll(res);
+        RemoveListViewItems();
+        UpdateListView();
+    } catch(wxMessageQueueError e) {
+        cout << e << endl;
+        D(wxLogMessage(TAG"ERROR: ", e);)
+    }
+}
+
+void myPlugin_window::OnClose(wxCloseEvent& event) {
+//   wxCriticalSectionLocker enter(m_pThreadCS);
+//   if(m_pThread) {
+//       wxLogMessage(TAG"Deleting thread");
+//       if(m_pThread->Delete() != wxTHREAD_NO_ERROR) {
+//           wxLogError(TAG"Can't delete the thread!");
+//       }
+//   }
+//   while(true) {
+//       {
+//           wxCriticalSectionLocker enter(m_pThreadCS);
+//           if(!m_pThread) break;
+//       }
+//       wxThread::This()->Sleep(1);
+//   }
+   Destroy();
+}
+
+void myPlugin_window::CreateSettingButton() {
+    if(settingBtn == nullptr) {
+       settingBtn = new wxButton(this, wxID_SETTING_BUTTON, wxT("Setting"), wxPoint(10, 500), wxDefaultSize, 0);
+    }
+}
+
+void myPlugin_window::OnSettingBtnClick(wxCommandEvent &event) {
+    SettingFrame *settingFrame = new SettingFrame(this);
+    settingFrame->SetHostText(host);
+    settingFrame->SetHostPortText(hostPort);
+    settingFrame->SetRequestIntervalText(requestInterval);
+
+    function<void()> set = [&]() {
+        cout << "hi" << endl;
+//        host = settingFrame->GetHost();
+        cout << host << endl;
+//        hostPort = settingFrame->GetHostPort();
+        cout << hostPort << endl;
+        requestInterval = settingFrame->GetRequestInterval();
+        cout << requestInterval << endl;
+    };
+
+    settingFrame->SetApplyButtonClickCallback(set);
+    settingFrame->Show(true);
+}
+
+
+wxThread::ExitCode WorkerThread::Entry() {
+    while(!TestDestroy()) {
+        wxString res = this->GetWayPointsFromHTTP();
+        msgQueue->Post(res);
+        wxQueueEvent(m_pHandler, new wxThreadEvent(wxEVT_COMMAND_WOKRERTHREAD_UPDATE));
+        break; // Do it Once
+    }
+
+    wxQueueEvent(m_pHandler, new wxThreadEvent(wxEVT_COMMAND_WOKRERTHREAD_COMPLETED));
+    return (wxThread::ExitCode)0; // success
+}
+
+wxString WorkerThread::GetWayPointsFromHTTP() {
+    D(wxLogMessage(_T(TAG"Get Request in Thread"));)
+    wxHTTP get;
+    get.SetHeader(_T("Content-type"), _T("text/html; charset=utf-8"));
+    get.SetTimeout(this->requestTimeout);
+
+    wxString res = wxEmptyString;
+
+    get.Connect(this->host, this->hostPort);
+    wxInputStream *httpStream = get.GetInputStream(_T("/"));
+
+    if(get.GetError() == wxPROTO_NOERR) {
+        wxStringOutputStream outStream(&res);
+        httpStream->Read(outStream);
+    } else {
+        res = wxEmptyString;
+        D(wxLogMessage(_T("Unable to connect"));)
+    }
+
+    wxDELETE(httpStream);
+    get.Close();
+    return res;
+}
+
+WorkerThread::~WorkerThread() {
+}
+
+
+

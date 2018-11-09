@@ -103,7 +103,7 @@ SET(SRC_DEMO
 		src/myPlugin_window.h
 		src/waypoint_list.cpp
 		src/waypoint_list.h
- 	)
+		src/SettingFrame.h src/SettingFrame.cpp)
 
 SET(SRC_NMEA0183
 		src/nmea0183/LatLong.hpp
